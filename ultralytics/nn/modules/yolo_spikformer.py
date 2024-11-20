@@ -596,3 +596,128 @@ class MS_Concat(nn.Module):
             if x[i].dim() == 5:
                 x[i] = x[i].mean(0)
         return torch.cat(x, self.d)
+
+class Attention(nn.Module):
+    def __init__(self, dim, num_heads=8):
+        super().__init__()
+        assert (
+            dim % num_heads == 0
+        ), f"dim {dim} should be divided by num_heads {num_heads}."
+
+        self.dim = dim
+        self.num_heads = num_heads
+        self.scale = 0.125
+
+        self.q_conv = nn.Sequential(RepConv(dim, dim, bias=False), nn.BatchNorm2d(dim))
+        self.k_conv = nn.Sequential(RepConv(dim, dim, bias=False), nn.BatchNorm2d(dim))
+        self.v_conv = nn.Sequential(RepConv(dim, dim, bias=False), nn.BatchNorm2d(dim))
+        self.proj_conv = nn.Sequential(
+            RepConv(dim, dim, bias=False), nn.BatchNorm2d(dim)
+        )
+        self.pe = nn.Sequential(RepConv(dim, dim, bias=False), nn.BatchNorm2d(dim))
+
+        self.lif1 = mem_update()
+        self.k_lif1 = mem_update()
+        self.q_lif1 = mem_update()
+        self.v_lif1 = mem_update()
+        self.attn_lif = mem_update()
+    
+    def forward(self, x):
+        T, B, C, H, W = x.shape
+        N = H * W
+
+        x = self.lif1(x)
+
+        q = self.q_conv(x.flatten(0, 1)).reshape(T, B, C, H, W)
+        k = self.k_conv(x.flatten(0, 1)).reshape(T, B, C, H, W)
+        v = v_copy = self.v_conv(x.flatten(0, 1)).reshape(T, B, C, H, W)
+
+        k = self.k_lif1(k).flatten(3)
+        k = (
+            k.transpose(-1, -2)
+            .reshape(T, B, N, self.num_heads, C // self.num_heads)
+            .permute(0, 1, 3, 2, 4)
+            .contiguous()
+        )
+
+        q = self.q_lif1(q).flatten(3)
+        q = (
+            q.transpose(-1, -2)
+            .reshape(T, B, N, self.num_heads, C // self.num_heads)
+            .permute(0, 1, 3, 2, 4)
+            .contiguous()
+        )
+
+        v = self.v_lif1(q).flatten(3)
+        v = (
+            v.transpose(-1, -2)
+            .reshape(T, B, N, self.num_heads, C // self.num_heads)
+            .permute(0, 1, 3, 2, 4)
+            .contiguous()
+        )
+
+        x = k.transpose(-2, -1) @ v
+        x = (q @ x) * self.scale
+
+        x = x.transpose(3, 4).reshape(T, B, C, H, W).contiguous() 
+        v_copy = self.pe(v_copy.flatten(0, 1)).reshape(T, B, C, H, W).contiguous()
+        x = x + v_copy
+        x = self.attn_lif(x)
+        x = x.flatten(0, 1)
+        x = self.proj_conv(x).reshape(T, B, C, H, W)
+        return x
+
+
+class PSABlock(nn.Module):
+    def __init__(self, c, num_heads=4, shortcut=True) -> None:
+        super().__init__()
+
+        self.attn = Attention(c,num_heads=num_heads)
+        self.ffn = nn.Sequential(MS_StandardConv(c, 2*c, 1), MS_StandardConv(2*c, c, 1))
+        self.add = shortcut
+    
+    def forward(self, x):
+        x = x + self.attn(x) if self.add else self.attn(x)
+        x = x + self.ffn(x) if self.add else self.ffn(x)
+        return x
+
+
+class C2PSA(nn.Module):
+    """
+    C2PSA module with attention mechanism for enhanced feature extraction and processing.
+
+    This module implements a convolutional block with attention mechanisms to enhance feature extraction and processing
+    capabilities. It includes a series of PSABlock modules for self-attention and feed-forward operations.
+
+    Attributes:
+        c (int): Number of hidden channels.
+        cv1 (Conv): 1x1 convolution layer to reduce the number of input channels to 2*c.
+        cv2 (Conv): 1x1 convolution layer to reduce the number of output channels to c.
+        m (nn.Sequential): Sequential container of PSABlock modules for attention and feed-forward operations.
+
+    Methods:
+        forward: Performs a forward pass through the C2PSA module, applying attention and feed-forward operations.
+
+    Notes:
+        This module essentially is the same as PSA module, but refactored to allow stacking more PSABlock modules.
+
+    Examples:
+        >>> c2psa = C2PSA(c1=256, c2=256, n=3, e=0.5)
+        >>> input_tensor = torch.randn(1, 256, 64, 64)
+        >>> output_tensor = c2psa(input_tensor)
+    """
+
+    def __init__(self, c1, c2, n=1, e=0.5):
+        """Initializes the C2PSA module with specified input/output channels, number of layers, and expansion ratio."""
+        super().__init__()
+        assert c1 == c2
+        self.c = int(c1 * e)
+        self.cv1 = MS_StandardConv(c1, 2 * self.c, 1, 1)
+        self.cv2 = MS_StandardConv(2 * self.c, c1, 1)
+
+        self.m = nn.Sequential(*(PSABlock(self.c, num_heads=self.c // 64) for _ in range(n)))
+    
+    def forward(self, x):
+        a, b = self.cv1(x).split((self.c, self.c), dim=2)
+        b = self.m(b)
+        return self.cv2(torch.cat((a, b), 2))

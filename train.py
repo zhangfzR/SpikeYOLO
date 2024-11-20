@@ -1,11 +1,11 @@
 import os
 
-os.environ['WANDB_DISABLED'] = 'true'
+# os.environ['WANDB_DISABLED'] = 'true'
 from ultralytics import YOLO
 
 model =YOLO("snn_yolov8s.yaml")
 
-print(model)
+# print(model)
 
 #train
 # model.train(data="coco.yaml",device=[0],epochs=100)  # train the model
