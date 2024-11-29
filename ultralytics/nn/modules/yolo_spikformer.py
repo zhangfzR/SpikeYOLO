@@ -614,7 +614,7 @@ class Attention(nn.Module):
         self.proj_conv = nn.Sequential(
             RepConv(dim, dim, bias=False), nn.BatchNorm2d(dim)
         )
-        self.pe = nn.Sequential(RepConv(dim, dim, bias=False), nn.BatchNorm2d(dim))
+        self.pe = MS_AllConvBlock(dim, dim)
 
         self.lif1 = mem_update()
         self.k_lif1 = mem_update()
@@ -660,7 +660,7 @@ class Attention(nn.Module):
         x = (q @ x) * self.scale
 
         x = x.transpose(3, 4).reshape(T, B, C, H, W).contiguous() 
-        v_copy = self.pe(v_copy.flatten(0, 1)).reshape(T, B, C, H, W).contiguous()
+        v_copy = self.pe(v_copy)
         x = x + v_copy
         x = self.attn_lif(x)
         x = x.flatten(0, 1)
@@ -674,6 +674,7 @@ class PSABlock(nn.Module):
 
         self.attn = Attention(c,num_heads=num_heads)
         self.ffn = nn.Sequential(MS_StandardConv(c, 2*c, 1), MS_StandardConv(2*c, c, 1))
+        # self.ffn = nn.Sequential(SepRepConv(c, 2*c, 1), SepRepConv(2*c, c, 1))
         self.add = shortcut
     
     def forward(self, x):
